@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { MercadoPagoConfig, Payment } from "mercadopago";
 
 export async function POST(request: Request) {
   try {
@@ -8,28 +7,56 @@ export async function POST(request: Request) {
 
     console.log("================================");
     console.log("WEBHOOK MERCADO PAGO");
-    console.log("BODY:", body);
     console.log("================================");
+    console.log("BODY:", body);
 
-    /*
-     * O Mercado Pago pode enviar notificações
-     * com diferentes formatos.
-     */
+    // ==========================================
+    // VERIFICAR TIPO DO EVENTO
+    // ==========================================
 
-    const paymentId =
-      body?.data?.id ??
-      body?.id ??
-      null;
+    if (body?.type !== "payment") {
+      console.log(
+        "Evento ignorado:",
+        body?.type
+      );
 
-    if (!paymentId) {
-      console.log("Webhook sem payment ID.");
       return NextResponse.json({
         received: true,
+        ignored: true,
       });
     }
 
+    // ==========================================
+    // PEGAR ID DO PAGAMENTO
+    // ==========================================
+
+    const paymentId = body?.data?.id;
+
+    if (!paymentId) {
+      console.error(
+        "Webhook sem payment ID"
+      );
+
+      return NextResponse.json(
+        {
+          error:
+            "Payment ID não informado.",
+        },
+        { status: 400 }
+      );
+    }
+
+    console.log(
+      "PAYMENT ID:",
+      paymentId
+    );
+
+    // ==========================================
+    // ACCESS TOKEN
+    // ==========================================
+
     const accessToken =
-      process.env.MERCADOPAGO_ACCESS_TOKEN;
+      process.env.MERCADOPAGO_ACCESS_TOKEN?.trim();
 
     if (!accessToken) {
       console.error(
@@ -39,48 +66,75 @@ export async function POST(request: Request) {
       return NextResponse.json(
         {
           error:
-            "Mercado Pago não configurado.",
+            "Access Token não configurado.",
         },
         { status: 500 }
       );
     }
 
-    /*
-     * Conecta ao Mercado Pago
-     */
+    // ==========================================
+    // CONSULTAR PAGAMENTO NO MERCADO PAGO
+    // ==========================================
 
-    const client = new MercadoPagoConfig({
-      accessToken,
-    });
+    const response = await fetch(
+      `https://api.mercadopago.com/v1/payments/${paymentId}`,
+      {
+        method: "GET",
 
-    const payment = new Payment(client);
+        headers: {
+          Authorization:
+            `Bearer ${accessToken}`,
 
-    /*
-     * Busca o pagamento diretamente
-     * na API do Mercado Pago.
-     */
+          Accept:
+            "application/json",
+        },
+      }
+    );
 
-    const pagamento =
-      await payment.get({
-        id: String(paymentId),
-      });
+    const payment =
+      await response.json();
 
-    console.log("PAGAMENTO:");
-    console.log({
-      id: pagamento.id,
-      status: pagamento.status,
-      external_reference:
-        pagamento.external_reference,
-    });
+    console.log(
+      "STATUS MERCADO PAGO:",
+      response.status
+    );
 
-    /*
-     * Nosso order_id foi colocado no
-     * external_reference quando o pagamento
-     * foi criado.
-     */
+    console.log(
+      "PAGAMENTO:",
+      payment
+    );
+
+    // ==========================================
+    // ERRO AO CONSULTAR PAGAMENTO
+    // ==========================================
+
+    if (!response.ok) {
+      console.error(
+        "ERRO AO CONSULTAR PAGAMENTO:",
+        payment
+      );
+
+      return NextResponse.json(
+        {
+          error:
+            "Não foi possível consultar o pagamento.",
+
+          details:
+            payment,
+        },
+        {
+          status:
+            response.status,
+        }
+      );
+    }
+
+    // ==========================================
+    // PEGAR ID DO PEDIDO
+    // ==========================================
 
     const orderId =
-      pagamento.external_reference;
+      payment?.external_reference;
 
     if (!orderId) {
       console.error(
@@ -89,71 +143,167 @@ export async function POST(request: Request) {
 
       return NextResponse.json({
         received: true,
+
+        warning:
+          "Pagamento recebido, mas sem external_reference.",
       });
     }
 
-    /*
-     * Supabase
-     */
+    console.log(
+      "PEDIDO:",
+      orderId
+    );
 
-    const supabase = await createClient();
+    // ==========================================
+    // SUPABASE
+    // ==========================================
 
-    /*
-     * Atualiza o pedido de acordo com
-     * o status do Mercado Pago.
-     */
+    const supabase =
+      await createClient();
 
-    let status = "pending";
+    // ==========================================
+    // STATUS DO PEDIDO
+    // ==========================================
 
-    if (pagamento.status === "approved") {
-      status = "paid";
-    } else if (
-      pagamento.status === "rejected" ||
-      pagamento.status === "cancelled"
+    let orderStatus = "pending";
+
+    if (
+      payment.status ===
+      "approved"
     ) {
-      status = "cancelled";
+      orderStatus = "paid";
     } else if (
-      pagamento.status === "refunded" ||
-      pagamento.status === "charged_back"
+      payment.status ===
+        "cancelled" ||
+      payment.status ===
+        "rejected"
     ) {
-      status = "refunded";
+      orderStatus = "cancelled";
+    } else if (
+      payment.status ===
+      "refunded"
+    ) {
+      orderStatus = "refunded";
     }
 
-    const { error } = await supabase
-      .from("orders")
-      .update({
-        status,
-        payment_id: String(
-          pagamento.id ?? ""
-        ),
-      })
-      .eq("id", orderId);
+    console.log(
+      "STATUS DO MERCADO PAGO:",
+      payment.status
+    );
+
+    console.log(
+      "STATUS DO PEDIDO:",
+      orderStatus
+    );
+
+    // ==========================================
+    // ATUALIZAR PEDIDO
+    // ==========================================
+
+    const { error } =
+      await supabase
+        .from("orders")
+        .update({
+          status:
+            orderStatus,
+
+          // IMPORTANTE:
+          // aqui usamos o status do Mercado Pago
+          // e NÃO "paid"
+          payment_status:
+            payment.status,
+
+          payment_id:
+            String(payment.id),
+        })
+        .eq(
+          "id",
+          orderId
+        );
+
+    // ==========================================
+    // ERRO SUPABASE
+    // ==========================================
 
     if (error) {
       console.error(
-        "ERRO AO ATUALIZAR PEDIDO:",
+        "================================"
+      );
+
+      console.error(
+        "ERRO AO ATUALIZAR PEDIDO:"
+      );
+
+      console.error(
         error
+      );
+
+      console.error(
+        "================================"
       );
 
       return NextResponse.json(
         {
           error:
             "Não foi possível atualizar o pedido.",
+
+          details:
+            error.message,
         },
         { status: 500 }
       );
     }
 
+    // ==========================================
+    // SUCESSO
+    // ==========================================
+
     console.log(
-      `PEDIDO ${orderId} ATUALIZADO PARA: ${status}`
+      "================================"
+    );
+
+    console.log(
+      "PEDIDO ATUALIZADO COM SUCESSO"
+    );
+
+    console.log(
+      "PEDIDO:",
+      orderId
+    );
+
+    console.log(
+      "PAYMENT ID:",
+      payment.id
+    );
+
+    console.log(
+      "PAYMENT STATUS:",
+      payment.status
+    );
+
+    console.log(
+      "ORDER STATUS:",
+      orderStatus
+    );
+
+    console.log(
+      "================================"
     );
 
     return NextResponse.json({
       received: true,
-      order_id: orderId,
-      payment_id: pagamento.id,
-      payment_status: pagamento.status,
-      order_status: status,
+
+      order_id:
+        orderId,
+
+      payment_id:
+        payment.id,
+
+      payment_status:
+        payment.status,
+
+      order_status:
+        orderStatus,
     });
   } catch (error) {
     console.error(
@@ -161,23 +311,28 @@ export async function POST(request: Request) {
     );
 
     console.error(
-      "ERRO WEBHOOK MERCADO PAGO:"
+      "ERRO NO WEBHOOK:"
     );
 
-    console.error(error);
+    console.error(
+      error
+    );
 
     console.error(
       "================================"
     );
 
-    /*
-     * Retornamos 200 para evitar que o Mercado Pago
-     * fique reenviando uma notificação causada por
-     * um erro inesperado.
-     */
+    return NextResponse.json(
+      {
+        error:
+          "Erro interno no webhook.",
 
-    return NextResponse.json({
-      received: true,
-    });
+        details:
+          error instanceof Error
+            ? error.message
+            : "Erro desconhecido.",
+      },
+      { status: 500 }
+    );
   }
 }
