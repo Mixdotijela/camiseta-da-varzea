@@ -41,7 +41,12 @@ export async function POST(request: Request) {
     // VALIDAÇÃO
     // -----------------------------
 
-    if (!nome || !email || !endereco || !whatsapp) {
+    if (
+      !nome ||
+      !email ||
+      !endereco ||
+      !whatsapp
+    ) {
       return NextResponse.json(
         {
           error:
@@ -51,7 +56,10 @@ export async function POST(request: Request) {
       );
     }
 
-    if (!Array.isArray(cart) || cart.length === 0) {
+    if (
+      !Array.isArray(cart) ||
+      cart.length === 0
+    ) {
       return NextResponse.json(
         {
           error: "Carrinho vazio.",
@@ -65,7 +73,10 @@ export async function POST(request: Request) {
     // -----------------------------
 
     const subtotal = cart.reduce(
-      (total: number, item: CartItem) => {
+      (
+        total: number,
+        item: CartItem
+      ) => {
         return (
           total +
           Number(item.price) *
@@ -75,49 +86,60 @@ export async function POST(request: Request) {
       0
     );
 
-    if (!Number.isFinite(subtotal) || subtotal <= 0) {
+    if (
+      !Number.isFinite(subtotal) ||
+      subtotal <= 0
+    ) {
       return NextResponse.json(
         {
-          error: "Subtotal inválido.",
+          error:
+            "Subtotal inválido.",
         },
         { status: 400 }
       );
     }
 
-    console.log("SUBTOTAL:", subtotal);
+    console.log(
+      "SUBTOTAL:",
+      subtotal
+    );
 
     // -----------------------------
     // SUPABASE
     // -----------------------------
 
-    const supabase = await createClient();
+    const supabase =
+      await createClient();
 
     // -----------------------------
     // CRIAR PEDIDO
     // -----------------------------
 
-    const { data: order, error: orderError } =
-      await supabase
-        .from("orders")
-        .insert({
-          customer_name: nome,
-          customer_address: endereco,
-          customer_whatsapp: whatsapp,
+    const {
+      data: order,
+      error: orderError,
+    } = await supabase
+      .from("orders")
+      .insert({
+        customer_name: nome,
+        customer_address: endereco,
+        customer_whatsapp: whatsapp,
 
-          status: "pending",
-          payment_status: "pending",
-          payment_method: "pix",
+        status: "pending",
+        payment_status: "pending",
+        payment_method: "pix",
 
-          subtotal: Number(
-            subtotal.toFixed(2)
-          ),
+        subtotal: Number(
+          subtotal.toFixed(2)
+        ),
+      })
+      .select("id")
+      .single();
 
-          shipping_fee: 0,
-        })
-        .select("id")
-        .single();
-
-    if (orderError || !order) {
+    if (
+      orderError ||
+      !order
+    ) {
       console.error(
         "ERRO AO CRIAR PEDIDO:",
         orderError
@@ -127,13 +149,15 @@ export async function POST(request: Request) {
         {
           error:
             "Não foi possível criar o pedido.",
-          details: orderError?.message,
+          details:
+            orderError?.message,
         },
         { status: 500 }
       );
     }
 
-    const orderId = order.id;
+    const orderId =
+      order.id;
 
     console.log(
       "PEDIDO CRIADO:",
@@ -141,22 +165,34 @@ export async function POST(request: Request) {
     );
 
     // -----------------------------
-    // CRIAR ITENS
+    // CRIAR ITENS DO PEDIDO
     // -----------------------------
 
-    const orderItems = cart.map(
-      (item: CartItem) => ({
-        order_id: orderId,
-        product_id: item.id,
-        quantity: Number(item.quantity),
-        price: Number(item.price),
-      })
-    );
+    const orderItems =
+      cart.map(
+        (item: CartItem) => ({
+          order_id:
+            orderId,
+          product_id:
+            item.id,
+          quantity:
+            Number(
+              item.quantity
+            ),
+          price:
+            Number(
+              item.price
+            ),
+        })
+      );
 
-    const { error: itemsError } =
-      await supabase
-        .from("order_items")
-        .insert(orderItems);
+    const {
+      error: itemsError,
+    } = await supabase
+      .from("order_items")
+      .insert(
+        orderItems
+      );
 
     if (itemsError) {
       console.error(
@@ -168,8 +204,10 @@ export async function POST(request: Request) {
         {
           error:
             "Pedido criado, mas os itens não puderam ser registrados.",
-          details: itemsError.message,
-          order_id: orderId,
+          details:
+            itemsError.message,
+          order_id:
+            orderId,
         },
         { status: 500 }
       );
@@ -184,7 +222,9 @@ export async function POST(request: Request) {
     // -----------------------------
 
     const accessToken =
-      process.env.MERCADOPAGO_ACCESS_TOKEN?.trim();
+      process.env
+        .MERCADOPAGO_ACCESS_TOKEN
+        ?.trim();
 
     if (!accessToken) {
       console.error(
@@ -195,7 +235,8 @@ export async function POST(request: Request) {
         {
           error:
             "Mercado Pago não está configurado.",
-          order_id: orderId,
+          order_id:
+            orderId,
         },
         { status: 500 }
       );
@@ -228,11 +269,14 @@ export async function POST(request: Request) {
           description:
             `Pedido ${orderId} - Camiseta da Várzea`,
 
-          payment_method_id: "pix",
+          payment_method_id:
+            "pix",
 
           payer: {
-            email: email,
-            first_name: nome,
+            email:
+              email,
+            first_name:
+              nome,
           },
 
           external_reference:
@@ -246,19 +290,33 @@ export async function POST(request: Request) {
     console.log(
       "MERCADO PAGO:",
       {
-        id: pagamento.id,
-        status: pagamento.status,
+        id:
+          pagamento.id,
+        status:
+          pagamento.status,
         status_detail:
           pagamento.status_detail,
       }
     );
 
-    if (!pagamento.id) {
+    // -----------------------------
+    // VERIFICAR PAGAMENTO
+    // -----------------------------
+
+    if (
+      !pagamento.id
+    ) {
+      console.error(
+        "Mercado Pago não retornou payment ID:",
+        pagamento
+      );
+
       return NextResponse.json(
         {
           error:
             "Mercado Pago não retornou o ID do pagamento.",
-          order_id: orderId,
+          order_id:
+            orderId,
         },
         { status: 502 }
       );
@@ -268,18 +326,24 @@ export async function POST(request: Request) {
     // SALVAR PAYMENT ID
     // -----------------------------
 
-    const { error: paymentError } =
-      await supabase
-        .from("orders")
-        .update({
-          payment_id:
-            String(pagamento.id),
+    const {
+      error: paymentError,
+    } = await supabase
+      .from("orders")
+      .update({
+        payment_id:
+          String(
+            pagamento.id
+          ),
 
-          payment_status:
-            pagamento.status ??
-            "pending",
-        })
-        .eq("id", orderId);
+        payment_status:
+          pagamento.status ??
+          "pending",
+      })
+      .eq(
+        "id",
+        orderId
+      );
 
     if (paymentError) {
       console.error(
@@ -289,7 +353,7 @@ export async function POST(request: Request) {
     }
 
     // -----------------------------
-    // PEGAR DADOS DO PIX
+    // DADOS DO PIX
     // -----------------------------
 
     const transactionData =
@@ -298,32 +362,43 @@ export async function POST(request: Request) {
         ?.transaction_data;
 
     const qrCode =
-      transactionData?.qr_code ??
+      transactionData
+        ?.qr_code ??
       null;
 
     const qrCodeBase64 =
-      transactionData?.qr_code_base64 ??
+      transactionData
+        ?.qr_code_base64 ??
       null;
 
     const ticketUrl =
-      transactionData?.ticket_url ??
+      transactionData
+        ?.ticket_url ??
       null;
 
-    console.log("PIX GERADO:", {
-      qrCode: !!qrCode,
-      qrCodeBase64:
-        !!qrCodeBase64,
-      ticketUrl,
-    });
+    console.log(
+      "PIX GERADO:",
+      {
+        qrCode:
+          !!qrCode,
+
+        qrCodeBase64:
+          !!qrCodeBase64,
+
+        ticketUrl,
+      }
+    );
 
     // -----------------------------
-    // RETORNO
+    // RETORNO PARA O CHECKOUT
     // -----------------------------
 
     return NextResponse.json({
-      success: true,
+      success:
+        true,
 
-      order_id: orderId,
+      order_id:
+        orderId,
 
       payment_id:
         pagamento.id,
@@ -351,7 +426,9 @@ export async function POST(request: Request) {
       "ERRO AO CRIAR PEDIDO:"
     );
 
-    console.error(error);
+    console.error(
+      error
+    );
 
     console.error(
       "================================"
@@ -372,7 +449,8 @@ export async function POST(request: Request) {
       {
         error:
           "Não foi possível criar o pagamento.",
-        details: detalhes,
+        details:
+          detalhes,
       },
       { status: 500 }
     );
