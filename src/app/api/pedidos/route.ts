@@ -1,12 +1,14 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { MercadoPagoConfig, Payment } from "mercadopago";
+import {
+  MercadoPagoConfig,
+  Payment,
+} from "mercadopago";
 
 type CartItem = {
   id: string;
   name: string;
   price: number;
-  image_url?: string | null;
   quantity: number;
 };
 
@@ -26,7 +28,7 @@ export async function POST(request: Request) {
       cart,
     } = body;
 
-    console.log("DADOS RECEBIDOS:", {
+    console.log("DADOS:", {
       nome,
       email,
       endereco,
@@ -52,36 +54,37 @@ export async function POST(request: Request) {
     if (!Array.isArray(cart) || cart.length === 0) {
       return NextResponse.json(
         {
-          error: "O carrinho está vazio.",
+          error: "Carrinho vazio.",
         },
         { status: 400 }
       );
     }
 
     // -----------------------------
-    // CALCULAR TOTAL
+    // CALCULAR SUBTOTAL
     // -----------------------------
 
-    const total = cart.reduce(
-      (soma: number, item: CartItem) => {
-        const preco = Number(item.price);
-        const quantidade = Number(item.quantity);
-
-        return soma + preco * quantidade;
+    const subtotal = cart.reduce(
+      (total: number, item: CartItem) => {
+        return (
+          total +
+          Number(item.price) *
+            Number(item.quantity)
+        );
       },
       0
     );
 
-    if (!Number.isFinite(total) || total <= 0) {
+    if (!Number.isFinite(subtotal) || subtotal <= 0) {
       return NextResponse.json(
         {
-          error: "Valor do pedido inválido.",
+          error: "Subtotal inválido.",
         },
         { status: 400 }
       );
     }
 
-    console.log("TOTAL:", total);
+    console.log("SUBTOTAL:", subtotal);
 
     // -----------------------------
     // SUPABASE
@@ -98,11 +101,18 @@ export async function POST(request: Request) {
         .from("orders")
         .insert({
           customer_name: nome,
-          customer_email: email,
           customer_address: endereco,
           customer_whatsapp: whatsapp,
-          total: total,
+
           status: "pending",
+          payment_status: "pending",
+          payment_method: "pix",
+
+          subtotal: Number(
+            subtotal.toFixed(2)
+          ),
+
+          shipping_fee: 0,
         })
         .select("id")
         .single();
@@ -115,7 +125,8 @@ export async function POST(request: Request) {
 
       return NextResponse.json(
         {
-          error: "Não foi possível criar o pedido.",
+          error:
+            "Não foi possível criar o pedido.",
           details: orderError?.message,
         },
         { status: 500 }
@@ -124,10 +135,13 @@ export async function POST(request: Request) {
 
     const orderId = order.id;
 
-    console.log("PEDIDO CRIADO:", orderId);
+    console.log(
+      "PEDIDO CRIADO:",
+      orderId
+    );
 
     // -----------------------------
-    // CRIAR ITENS DO PEDIDO
+    // CRIAR ITENS
     // -----------------------------
 
     const orderItems = cart.map(
@@ -153,12 +167,17 @@ export async function POST(request: Request) {
       return NextResponse.json(
         {
           error:
-            "Não foi possível registrar os itens do pedido.",
+            "Pedido criado, mas os itens não puderam ser registrados.",
           details: itemsError.message,
+          order_id: orderId,
         },
         { status: 500 }
       );
     }
+
+    console.log(
+      "ITENS CRIADOS COM SUCESSO"
+    );
 
     // -----------------------------
     // MERCADO PAGO
@@ -169,75 +188,76 @@ export async function POST(request: Request) {
 
     if (!accessToken) {
       console.error(
-        "MERCADOPAGO_ACCESS_TOKEN NÃO CONFIGURADO."
+        "MERCADOPAGO_ACCESS_TOKEN NÃO CONFIGURADO"
       );
 
       return NextResponse.json(
         {
           error:
-            "Mercado Pago não está configurado no servidor.",
+            "Mercado Pago não está configurado.",
           order_id: orderId,
         },
         { status: 500 }
       );
     }
 
-    const client = new MercadoPagoConfig({
-      accessToken,
-    });
+    const client =
+      new MercadoPagoConfig({
+        accessToken,
+      });
 
-    const payment = new Payment(client);
+    const payment =
+      new Payment(client);
+
+    console.log(
+      "CRIANDO PIX NO MERCADO PAGO..."
+    );
 
     // -----------------------------
-    // CRIAR PIX
+    // CRIAR PAGAMENTO PIX
     // -----------------------------
 
-    console.log("CRIANDO PAGAMENTO PIX...");
+    const pagamento =
+      await payment.create({
+        body: {
+          transaction_amount:
+            Number(
+              subtotal.toFixed(2)
+            ),
 
-    const pagamento = await payment.create({
-      body: {
-        transaction_amount: Number(
-          total.toFixed(2)
-        ),
+          description:
+            `Pedido ${orderId} - Camiseta da Várzea`,
 
-        description:
-          `Pedido ${orderId} - Camiseta da Várzea`,
+          payment_method_id: "pix",
 
-        payment_method_id: "pix",
+          payer: {
+            email: email,
+            first_name: nome,
+          },
 
-        payer: {
-          email: email,
-          first_name: nome,
+          external_reference:
+            String(orderId),
+
+          notification_url:
+            `${process.env.NEXT_PUBLIC_SITE_URL}/api/pedidos/mercadopago`,
         },
+      });
 
-        external_reference: String(orderId),
-
-        notification_url:
-          `${process.env.NEXT_PUBLIC_SITE_URL}/api/pedidos/mercadopago`,
-      },
-    });
-
-    console.log("RESPOSTA MERCADO PAGO:", {
-      id: pagamento.id,
-      status: pagamento.status,
-      status_detail: pagamento.status_detail,
-    });
-
-    // -----------------------------
-    // VERIFICAR PAGAMENTO
-    // -----------------------------
+    console.log(
+      "MERCADO PAGO:",
+      {
+        id: pagamento.id,
+        status: pagamento.status,
+        status_detail:
+          pagamento.status_detail,
+      }
+    );
 
     if (!pagamento.id) {
-      console.error(
-        "Mercado Pago não retornou payment ID:",
-        pagamento
-      );
-
       return NextResponse.json(
         {
           error:
             "Mercado Pago não retornou o ID do pagamento.",
-          details: pagamento,
           order_id: orderId,
         },
         { status: 502 }
@@ -248,46 +268,56 @@ export async function POST(request: Request) {
     // SALVAR PAYMENT ID
     // -----------------------------
 
-    const { error: updateError } =
+    const { error: paymentError } =
       await supabase
         .from("orders")
         .update({
-          payment_id: String(pagamento.id),
+          payment_id:
+            String(pagamento.id),
+
+          payment_status:
+            pagamento.status ??
+            "pending",
         })
         .eq("id", orderId);
 
-    if (updateError) {
+    if (paymentError) {
       console.error(
         "ERRO AO SALVAR PAYMENT ID:",
-        updateError
+        paymentError
       );
     }
 
     // -----------------------------
-    // DADOS DO PIX
+    // PEGAR DADOS DO PIX
     // -----------------------------
 
     const transactionData =
-      pagamento.point_of_interaction
+      pagamento
+        .point_of_interaction
         ?.transaction_data;
 
     const qrCode =
-      transactionData?.qr_code ?? null;
+      transactionData?.qr_code ??
+      null;
 
     const qrCodeBase64 =
-      transactionData?.qr_code_base64 ?? null;
+      transactionData?.qr_code_base64 ??
+      null;
 
     const ticketUrl =
-      transactionData?.ticket_url ?? null;
+      transactionData?.ticket_url ??
+      null;
 
-    console.log("PIX:", {
+    console.log("PIX GERADO:", {
       qrCode: !!qrCode,
-      qrCodeBase64: !!qrCodeBase64,
+      qrCodeBase64:
+        !!qrCodeBase64,
       ticketUrl,
     });
 
     // -----------------------------
-    // RETORNO PARA O CHECKOUT
+    // RETORNO
     // -----------------------------
 
     return NextResponse.json({
@@ -295,15 +325,15 @@ export async function POST(request: Request) {
 
       order_id: orderId,
 
-      payment_id: pagamento.id,
+      payment_id:
+        pagamento.id,
 
       payment_status:
-        pagamento.status ?? "pending",
+        pagamento.status ??
+        "pending",
 
-      payment_status_detail:
-        pagamento.status_detail ?? null,
-
-      qr_code: qrCode,
+      qr_code:
+        qrCode,
 
       qr_code_base64:
         qrCodeBase64,
@@ -313,10 +343,19 @@ export async function POST(request: Request) {
     });
 
   } catch (error: any) {
-    console.error("================================");
-    console.error("ERRO AO CRIAR PEDIDO:");
+    console.error(
+      "================================"
+    );
+
+    console.error(
+      "ERRO AO CRIAR PEDIDO:"
+    );
+
     console.error(error);
-    console.error("================================");
+
+    console.error(
+      "================================"
+    );
 
     const detalhes =
       error?.cause ??
@@ -335,7 +374,7 @@ export async function POST(request: Request) {
           "Não foi possível criar o pagamento.",
         details: detalhes,
       },
-      { status: 402 }
+      { status: 500 }
     );
   }
 }
