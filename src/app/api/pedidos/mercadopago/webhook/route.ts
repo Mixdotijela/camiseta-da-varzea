@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import {
+  MercadoPagoConfig,
+  Payment,
+} from "mercadopago";
 
 export async function POST(request: Request) {
   try {
@@ -7,53 +11,23 @@ export async function POST(request: Request) {
 
     console.log("================================");
     console.log("WEBHOOK MERCADO PAGO");
-    console.log("================================");
     console.log("BODY:", body);
+    console.log("================================");
 
-    // ==========================================
-    // VERIFICAR TIPO DO EVENTO
-    // ==========================================
+    const paymentId =
+      body?.data?.id ??
+      body?.id ??
+      null;
 
-    if (body?.type !== "payment") {
+    if (!paymentId) {
       console.log(
-        "Evento ignorado:",
-        body?.type
+        "Webhook sem payment ID."
       );
 
       return NextResponse.json({
         received: true,
-        ignored: true,
       });
     }
-
-    // ==========================================
-    // PEGAR ID DO PAGAMENTO
-    // ==========================================
-
-    const paymentId = body?.data?.id;
-
-    if (!paymentId) {
-      console.error(
-        "Webhook sem payment ID"
-      );
-
-      return NextResponse.json(
-        {
-          error:
-            "Payment ID não informado.",
-        },
-        { status: 400 }
-      );
-    }
-
-    console.log(
-      "PAYMENT ID:",
-      paymentId
-    );
-
-    // ==========================================
-    // ACCESS TOKEN
-    // ==========================================
 
     const accessToken =
       process.env.MERCADOPAGO_ACCESS_TOKEN?.trim();
@@ -66,75 +40,34 @@ export async function POST(request: Request) {
       return NextResponse.json(
         {
           error:
-            "Access Token não configurado.",
+            "Mercado Pago não configurado.",
         },
         { status: 500 }
       );
     }
 
-    // ==========================================
-    // CONSULTAR PAGAMENTO NO MERCADO PAGO
-    // ==========================================
-
-    const response = await fetch(
-      `https://api.mercadopago.com/v1/payments/${paymentId}`,
-      {
-        method: "GET",
-
-        headers: {
-          Authorization:
-            `Bearer ${accessToken}`,
-
-          Accept:
-            "application/json",
-        },
-      }
-    );
+    const client =
+      new MercadoPagoConfig({
+        accessToken,
+      });
 
     const payment =
-      await response.json();
+      new Payment(client);
 
-    console.log(
-      "STATUS MERCADO PAGO:",
-      response.status
-    );
+    const pagamento =
+      await payment.get({
+        id: String(paymentId),
+      });
 
-    console.log(
-      "PAGAMENTO:",
-      payment
-    );
-
-    // ==========================================
-    // ERRO AO CONSULTAR PAGAMENTO
-    // ==========================================
-
-    if (!response.ok) {
-      console.error(
-        "ERRO AO CONSULTAR PAGAMENTO:",
-        payment
-      );
-
-      return NextResponse.json(
-        {
-          error:
-            "Não foi possível consultar o pagamento.",
-
-          details:
-            payment,
-        },
-        {
-          status:
-            response.status,
-        }
-      );
-    }
-
-    // ==========================================
-    // PEGAR ID DO PEDIDO
-    // ==========================================
+    console.log("PAGAMENTO:", {
+      id: pagamento.id,
+      status: pagamento.status,
+      external_reference:
+        pagamento.external_reference,
+    });
 
     const orderId =
-      payment?.external_reference;
+      pagamento.external_reference;
 
     if (!orderId) {
       console.error(
@@ -143,196 +76,87 @@ export async function POST(request: Request) {
 
       return NextResponse.json({
         received: true,
-
-        warning:
-          "Pagamento recebido, mas sem external_reference.",
       });
     }
-
-    console.log(
-      "PEDIDO:",
-      orderId
-    );
-
-    // ==========================================
-    // SUPABASE
-    // ==========================================
 
     const supabase =
       await createClient();
 
-    // ==========================================
-    // STATUS DO PEDIDO
-    // ==========================================
-
-    let orderStatus = "pending";
+    let status = "pending";
 
     if (
-      payment.status ===
-      "approved"
+      pagamento.status === "approved"
     ) {
-      orderStatus = "paid";
+      status = "paid";
     } else if (
-      payment.status ===
-        "cancelled" ||
-      payment.status ===
-        "rejected"
+      pagamento.status === "rejected" ||
+      pagamento.status === "cancelled"
     ) {
-      orderStatus = "cancelled";
+      status = "cancelled";
     } else if (
-      payment.status ===
-      "refunded"
+      pagamento.status === "refunded" ||
+      pagamento.status === "charged_back"
     ) {
-      orderStatus = "refunded";
+      status = "refunded";
     }
-
-    console.log(
-      "STATUS DO MERCADO PAGO:",
-      payment.status
-    );
-
-    console.log(
-      "STATUS DO PEDIDO:",
-      orderStatus
-    );
-
-    // ==========================================
-    // ATUALIZAR PEDIDO
-    // ==========================================
 
     const { error } =
       await supabase
         .from("orders")
         .update({
-          status:
-            orderStatus,
-
-          // IMPORTANTE:
-          // aqui usamos o status do Mercado Pago
-          // e NÃO "paid"
-          payment_status:
-            payment.status,
-
-          payment_id:
-            String(payment.id),
+          status,
+          payment_id: String(
+            pagamento.id ?? ""
+          ),
         })
-        .eq(
-          "id",
-          orderId
-        );
-
-    // ==========================================
-    // ERRO SUPABASE
-    // ==========================================
+        .eq("id", orderId);
 
     if (error) {
       console.error(
-        "================================"
-      );
-
-      console.error(
-        "ERRO AO ATUALIZAR PEDIDO:"
-      );
-
-      console.error(
+        "ERRO AO ATUALIZAR PEDIDO:",
         error
-      );
-
-      console.error(
-        "================================"
       );
 
       return NextResponse.json(
         {
           error:
             "Não foi possível atualizar o pedido.",
-
-          details:
-            error.message,
+          details: error.message,
         },
         { status: 500 }
       );
     }
 
-    // ==========================================
-    // SUCESSO
-    // ==========================================
-
     console.log(
-      "================================"
-    );
-
-    console.log(
-      "PEDIDO ATUALIZADO COM SUCESSO"
-    );
-
-    console.log(
-      "PEDIDO:",
-      orderId
-    );
-
-    console.log(
-      "PAYMENT ID:",
-      payment.id
-    );
-
-    console.log(
-      "PAYMENT STATUS:",
-      payment.status
-    );
-
-    console.log(
-      "ORDER STATUS:",
-      orderStatus
-    );
-
-    console.log(
-      "================================"
+      `PEDIDO ${orderId} ATUALIZADO PARA: ${status}`
     );
 
     return NextResponse.json({
       received: true,
-
-      order_id:
-        orderId,
-
-      payment_id:
-        payment.id,
-
+      order_id: orderId,
+      payment_id: pagamento.id,
       payment_status:
-        payment.status,
-
-      order_status:
-        orderStatus,
+        pagamento.status,
+      order_status: status,
     });
+
   } catch (error) {
     console.error(
       "================================"
     );
 
     console.error(
-      "ERRO NO WEBHOOK:"
+      "ERRO WEBHOOK MERCADO PAGO:"
     );
 
-    console.error(
-      error
-    );
+    console.error(error);
 
     console.error(
       "================================"
     );
 
-    return NextResponse.json(
-      {
-        error:
-          "Erro interno no webhook.",
-
-        details:
-          error instanceof Error
-            ? error.message
-            : "Erro desconhecido.",
-      },
-      { status: 500 }
-    );
+    return NextResponse.json({
+      received: true,
+    });
   }
 }
