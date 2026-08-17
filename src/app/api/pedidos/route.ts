@@ -1,25 +1,21 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { MercadoPagoConfig, Payment } from "mercadopago";
 
-type ProdutoCarrinho = {
+type CartItem = {
   id: string;
   name: string;
   price: number;
-  image_url: string | null;
   quantity: number;
-};
-
-type PedidoData = {
-  nome: string;
-  email?: string;
-  endereco: string;
-  whatsapp: string;
-  cart: ProdutoCarrinho[];
 };
 
 export async function POST(request: Request) {
   try {
-    const body: PedidoData = await request.json();
+    console.log("================================");
+    console.log("CRIANDO PEDIDO");
+    console.log("================================");
+
+    const body = await request.json();
 
     const {
       nome,
@@ -29,25 +25,38 @@ export async function POST(request: Request) {
       cart,
     } = body;
 
-    console.log("================================");
-    console.log("CRIANDO PEDIDO");
-    console.log("================================");
-    console.log("BODY:", body);
+    console.log("CLIENTE:", {
+      nome,
+      email,
+      endereco,
+      whatsapp,
+    });
 
-    // ==========================
-    // VALIDAR
-    // ==========================
+    console.log("CARRINHO:", cart);
 
-    if (!nome || !endereco || !whatsapp) {
+    // -----------------------------------------
+    // VALIDAÇÃO
+    // -----------------------------------------
+
+    if (
+      !nome ||
+      !email ||
+      !endereco ||
+      !whatsapp
+    ) {
       return NextResponse.json(
         {
-          error: "Preencha nome, endereço e WhatsApp.",
+          error:
+            "Nome, e-mail, endereço e WhatsApp são obrigatórios.",
         },
         { status: 400 }
       );
     }
 
-    if (!cart || cart.length === 0) {
+    if (
+      !Array.isArray(cart) ||
+      cart.length === 0
+    ) {
       return NextResponse.json(
         {
           error: "O carrinho está vazio.",
@@ -56,360 +65,272 @@ export async function POST(request: Request) {
       );
     }
 
-    // ==========================
-    // CALCULAR TOTAL
-    // ==========================
+    // -----------------------------------------
+    // SUPABASE
+    // -----------------------------------------
 
-    const total = cart.reduce((valor, item) => {
-      const preco = Number(item.price);
-      const quantidade = Number(item.quantity);
+    const supabase = await createClient();
 
-      if (
-        !Number.isFinite(preco) ||
-        !Number.isFinite(quantidade) ||
-        quantidade <= 0
-      ) {
-        return valor;
-      }
+    // -----------------------------------------
+    // CALCULA O TOTAL
+    // -----------------------------------------
 
-      return valor + preco * quantidade;
-    }, 0);
+    const total = cart.reduce(
+      (soma: number, item: CartItem) => {
+        return (
+          soma +
+          Number(item.price) *
+            Number(item.quantity)
+        );
+      },
+      0
+    );
+
+    console.log("TOTAL:", total);
 
     if (!Number.isFinite(total) || total <= 0) {
       return NextResponse.json(
         {
-          error: "Valor total do pedido inválido.",
+          error: "Valor do pedido inválido.",
         },
         { status: 400 }
       );
     }
 
-    console.log("TOTAL:", total);
+    // -----------------------------------------
+    // CRIA O PEDIDO
+    // -----------------------------------------
 
-    // ==========================
-    // SUPABASE
-    // ==========================
-
-    const supabase = await createClient();
-
-    const orderId = crypto.randomUUID();
-
-    // ==========================
-    // CRIAR PEDIDO
-    // ==========================
-
-    const { error: orderError } = await supabase
-      .from("orders")
-      .insert({
-        id: orderId,
-        customer_name: nome,
-        customer_address: endereco,
-        customer_whatsapp: whatsapp,
-        total: Number(total.toFixed(2)),
-        payment_method: "pix",
-        status: "pending",
-      });
-
-    if (orderError) {
-      console.error("ERRO ORDERS:", orderError);
-
-      return NextResponse.json(
-        {
-          error: "Não foi possível criar o pedido.",
-          details: orderError.message,
-        },
-        { status: 500 }
-      );
-    }
-
-    // ==========================
-    // ITENS DO PEDIDO
-    // ==========================
-
-    const orderItems = cart.map((item) => ({
-      order_id: orderId,
-      product_id: item.id,
-      product_name: item.name,
-      quantity: Number(item.quantity),
-      unit_price: Number(item.price),
-      subtotal:
-        Number(item.price) * Number(item.quantity),
-    }));
-
-    const { error: itemsError } = await supabase
-      .from("order_items")
-      .insert(orderItems);
-
-    if (itemsError) {
-      console.error(
-        "ERRO ORDER_ITEMS:",
-        itemsError
-      );
-
+    const { data: order, error: orderError } =
       await supabase
         .from("orders")
-        .delete()
-        .eq("id", orderId);
+        .insert({
+          customer_name: nome,
+          customer_email: email,
+          customer_address: endereco,
+          customer_whatsapp: whatsapp,
+          total: total,
+          status: "pending",
+        })
+        .select("id")
+        .single();
+
+    if (orderError || !order) {
+      console.error(
+        "ERRO AO CRIAR PEDIDO:",
+        orderError
+      );
 
       return NextResponse.json(
         {
           error:
-            "Não foi possível salvar os itens.",
-          details: itemsError.message,
+            "Não foi possível criar o pedido.",
+          details: orderError?.message,
         },
         { status: 500 }
       );
     }
 
-    // ==========================
-    // ACCESS TOKEN
-    // ==========================
+    const orderId = order.id;
+
+    console.log(
+      "PEDIDO CRIADO:",
+      orderId
+    );
+
+    // -----------------------------------------
+    // CRIA OS ITENS DO PEDIDO
+    // -----------------------------------------
+
+    const orderItems = cart.map(
+      (item: CartItem) => ({
+        order_id: orderId,
+        product_id: item.id,
+        quantity: Number(item.quantity),
+        price: Number(item.price),
+      })
+    );
+
+    const { error: itemsError } =
+      await supabase
+        .from("order_items")
+        .insert(orderItems);
+
+    if (itemsError) {
+      console.error(
+        "ERRO AO CRIAR ITENS:",
+        itemsError
+      );
+
+      return NextResponse.json(
+        {
+          error:
+            "Pedido criado, mas não foi possível registrar os itens.",
+          details: itemsError.message,
+          order_id: orderId,
+        },
+        { status: 500 }
+      );
+    }
+
+    // -----------------------------------------
+    // MERCADO PAGO
+    // -----------------------------------------
 
     const accessToken =
       process.env.MERCADOPAGO_ACCESS_TOKEN?.trim();
 
     if (!accessToken) {
-      await supabase
-        .from("orders")
-        .delete()
-        .eq("id", orderId);
+      console.error(
+        "MERCADOPAGO_ACCESS_TOKEN NÃO CONFIGURADO."
+      );
 
       return NextResponse.json(
         {
           error:
-            "Access Token do Mercado Pago não configurado.",
+            "Mercado Pago não está configurado no servidor.",
+          order_id: orderId,
         },
         { status: 500 }
       );
     }
 
-    // ==========================
-    // E-MAIL DO BUYER DE TESTE
-    // ==========================
+    const client =
+      new MercadoPagoConfig({
+        accessToken,
+      });
 
-    const payerEmail =
-      process.env.MERCADOPAGO_TEST_PAYER_EMAIL
-        ?.trim()
-        .toLowerCase();
+    const payment = new Payment(client);
 
-    if (
-      !payerEmail ||
-      !payerEmail.endsWith("@testuser.com")
-    ) {
-      await supabase
-        .from("orders")
-        .delete()
-        .eq("id", orderId);
-
-      return NextResponse.json(
-        {
-          error:
-            "Configure MERCADOPAGO_TEST_PAYER_EMAIL com o e-mail do Buyer Test User.",
-        },
-        { status: 400 }
-      );
-    }
+    // -----------------------------------------
+    // CRIA PAGAMENTO PIX
+    // -----------------------------------------
 
     console.log(
-      "PAYER TESTE:",
-      payerEmail
+      "CRIANDO PAGAMENTO PIX..."
     );
 
-    // ==========================
-    // CRIAR PEDIDO NO MERCADO PAGO
-    // ==========================
-
-    const mercadoPagoResponse = await fetch(
-      "https://api.mercadopago.com/v1/orders",
-      {
-        method: "POST",
-
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-          Authorization: `Bearer ${accessToken}`,
-          "X-Idempotency-Key": crypto.randomUUID(),
-        },
-
-        body: JSON.stringify({
-          type: "online",
-
-          total_amount: Number(
+    const pagamento =
+      await payment.create({
+        body: {
+          transaction_amount: Number(
             total.toFixed(2)
-          ).toFixed(2),
+          ),
 
-          external_reference: orderId,
+          description:
+            `Pedido ${orderId} - Camiseta da Várzea`,
 
-          processing_mode: "automatic",
-
-          transactions: {
-            payments: [
-              {
-                amount: Number(
-                  total.toFixed(2)
-                ).toFixed(2),
-
-                payment_method: {
-                  id: "pix",
-                  type: "bank_transfer",
-                },
-
-                expiration_time: "P1D",
-              },
-            ],
-          },
+          payment_method_id: "pix",
 
           payer: {
-            email: payerEmail,
+            email: email,
+            first_name: nome,
           },
-        }),
+
+          external_reference: String(
+            orderId
+          ),
+
+          notification_url:
+            `${process.env.NEXT_PUBLIC_SITE_URL}/api/webhook/mercadopago`,
+        },
+      });
+
+    console.log(
+      "PAGAMENTO MERCADO PAGO:",
+      {
+        id: pagamento.id,
+        status: pagamento.status,
+        status_detail:
+          pagamento.status_detail,
       }
     );
 
-    const mercadoPagoData =
-      await mercadoPagoResponse.json();
+    // -----------------------------------------
+    // VERIFICA SE O MERCADO PAGO ACEITOU
+    // -----------------------------------------
 
-    console.log(
-      "STATUS MERCADO PAGO:",
-      mercadoPagoResponse.status
-    );
-
-    console.log(
-      "RESPOSTA MERCADO PAGO:",
-      mercadoPagoData
-    );
-
-    // ==========================
-    // ERRO MERCADO PAGO
-    // ==========================
-
-    if (!mercadoPagoResponse.ok) {
+    if (!pagamento.id) {
       console.error(
-        "ERRO MERCADO PAGO:",
-        mercadoPagoData
+        "MERCADO PAGO NÃO RETORNOU PAYMENT ID:",
+        pagamento
       );
-
-      await supabase
-        .from("orders")
-        .delete()
-        .eq("id", orderId);
 
       return NextResponse.json(
         {
           error:
-            "Mercado Pago recusou o pagamento.",
-          status:
-            mercadoPagoResponse.status,
-          details:
-            mercadoPagoData,
+            "Mercado Pago não retornou o ID do pagamento.",
+          details: pagamento,
+          order_id: orderId,
         },
-        {
-          status:
-            mercadoPagoResponse.status,
-        }
+        { status: 502 }
       );
     }
 
-    // ==========================
-    // PAGAMENTO
-    // ==========================
+    // -----------------------------------------
+    // ATUALIZA PEDIDO COM PAYMENT ID
+    // -----------------------------------------
 
-    const pagamento =
-      mercadoPagoData?.transactions
-        ?.payments?.[0];
-
-    if (!pagamento) {
+    const { error: updateError } =
       await supabase
         .from("orders")
-        .delete()
+        .update({
+          payment_id: String(
+            pagamento.id
+          ),
+        })
         .eq("id", orderId);
 
-      return NextResponse.json(
-        {
-          error:
-            "Mercado Pago não retornou o pagamento.",
-          details:
-            mercadoPagoData,
-        },
-        { status: 500 }
+    if (updateError) {
+      console.error(
+        "ERRO AO SALVAR PAYMENT ID:",
+        updateError
       );
     }
 
-    // ==========================
-    // PIX
-    // ==========================
+    // -----------------------------------------
+    // DADOS DO PIX
+    // -----------------------------------------
 
-    const paymentMethod =
-      pagamento.payment_method;
+    const pointOfInteraction =
+      pagamento.point_of_interaction;
+
+    const transactionData =
+      pointOfInteraction
+        ?.transaction_data;
 
     const qrCode =
-      paymentMethod?.qr_code ?? null;
+      transactionData?.qr_code ?? null;
 
     const qrCodeBase64 =
-      paymentMethod?.qr_code_base64 ?? null;
+      transactionData?.qr_code_base64 ?? null;
 
     const ticketUrl =
-      paymentMethod?.ticket_url ?? null;
+      transactionData?.ticket_url ?? null;
 
-    console.log("PIX GERADO");
-    console.log(
-      "PAYMENT ID:",
-      pagamento.id
-    );
-    console.log(
-      "STATUS:",
-      pagamento.status
-    );
-    console.log(
-      "QR CODE:",
-      !!qrCode
-    );
-    console.log(
-      "QR BASE64:",
-      !!qrCodeBase64
-    );
+    console.log("PIX GERADO:", {
+      qrCodeExiste: !!qrCode,
+      qrCodeBase64Existe:
+        !!qrCodeBase64,
+      ticketUrl,
+    });
 
-    // ==========================
-    // ATUALIZAR PEDIDO
-    // ==========================
-
-    await supabase
-      .from("orders")
-      .update({
-        payment_id:
-          pagamento.id
-            ? String(pagamento.id)
-            : null,
-      })
-      .eq("id", orderId);
-
-    // ==========================
-    // RETORNAR PIX
-    // ==========================
+    // -----------------------------------------
+    // RETORNO PARA O CHECKOUT
+    // -----------------------------------------
 
     return NextResponse.json({
       success: true,
 
       order_id: orderId,
 
-      mercado_pago_order_id:
-        mercadoPagoData.id ?? null,
-
-      payment_id:
-        pagamento.id ?? null,
-
-      total:
-        Number(total.toFixed(2)),
-
-      payment_method: "pix",
+      payment_id: pagamento.id,
 
       payment_status:
-        pagamento.status ??
-        "action_required",
+        pagamento.status ?? "pending",
 
       payment_status_detail:
-        pagamento.status_detail ??
-        "waiting_transfer",
+        pagamento.status_detail ?? null,
 
       qr_code: qrCode,
 
@@ -419,7 +340,7 @@ export async function POST(request: Request) {
       ticket_url:
         ticketUrl,
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error(
       "================================"
     );
@@ -434,17 +355,28 @@ export async function POST(request: Request) {
       "================================"
     );
 
+    // -----------------------------------------
+    // MOSTRA O ERRO REAL DO MERCADO PAGO
+    // -----------------------------------------
+
+    const mercadoPagoError =
+      error?.cause ??
+      error?.response?.data ??
+      error?.message ??
+      error;
+
+    console.error(
+      "DETALHES DO ERRO:",
+      mercadoPagoError
+    );
+
     return NextResponse.json(
       {
         error:
-          "Erro interno ao processar o pedido.",
-
-        details:
-          error instanceof Error
-            ? error.message
-            : "Erro desconhecido.",
+          "Não foi possível criar o pagamento.",
+        details: mercadoPagoError,
       },
-      { status: 500 }
+      { status: 402 }
     );
   }
 }
