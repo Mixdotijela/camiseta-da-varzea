@@ -6,6 +6,7 @@ type CartItem = {
   id: string;
   name: string;
   price: number;
+  image_url?: string | null;
   quantity: number;
 };
 
@@ -25,7 +26,7 @@ export async function POST(request: Request) {
       cart,
     } = body;
 
-    console.log("CLIENTE:", {
+    console.log("DADOS RECEBIDOS:", {
       nome,
       email,
       endereco,
@@ -34,16 +35,11 @@ export async function POST(request: Request) {
 
     console.log("CARRINHO:", cart);
 
-    // -----------------------------------------
+    // -----------------------------
     // VALIDAÇÃO
-    // -----------------------------------------
+    // -----------------------------
 
-    if (
-      !nome ||
-      !email ||
-      !endereco ||
-      !whatsapp
-    ) {
+    if (!nome || !email || !endereco || !whatsapp) {
       return NextResponse.json(
         {
           error:
@@ -53,10 +49,7 @@ export async function POST(request: Request) {
       );
     }
 
-    if (
-      !Array.isArray(cart) ||
-      cart.length === 0
-    ) {
+    if (!Array.isArray(cart) || cart.length === 0) {
       return NextResponse.json(
         {
           error: "O carrinho está vazio.",
@@ -65,28 +58,19 @@ export async function POST(request: Request) {
       );
     }
 
-    // -----------------------------------------
-    // SUPABASE
-    // -----------------------------------------
-
-    const supabase = await createClient();
-
-    // -----------------------------------------
-    // CALCULA O TOTAL
-    // -----------------------------------------
+    // -----------------------------
+    // CALCULAR TOTAL
+    // -----------------------------
 
     const total = cart.reduce(
       (soma: number, item: CartItem) => {
-        return (
-          soma +
-          Number(item.price) *
-            Number(item.quantity)
-        );
+        const preco = Number(item.price);
+        const quantidade = Number(item.quantity);
+
+        return soma + preco * quantidade;
       },
       0
     );
-
-    console.log("TOTAL:", total);
 
     if (!Number.isFinite(total) || total <= 0) {
       return NextResponse.json(
@@ -97,9 +81,17 @@ export async function POST(request: Request) {
       );
     }
 
-    // -----------------------------------------
-    // CRIA O PEDIDO
-    // -----------------------------------------
+    console.log("TOTAL:", total);
+
+    // -----------------------------
+    // SUPABASE
+    // -----------------------------
+
+    const supabase = await createClient();
+
+    // -----------------------------
+    // CRIAR PEDIDO
+    // -----------------------------
 
     const { data: order, error: orderError } =
       await supabase
@@ -123,8 +115,7 @@ export async function POST(request: Request) {
 
       return NextResponse.json(
         {
-          error:
-            "Não foi possível criar o pedido.",
+          error: "Não foi possível criar o pedido.",
           details: orderError?.message,
         },
         { status: 500 }
@@ -133,14 +124,11 @@ export async function POST(request: Request) {
 
     const orderId = order.id;
 
-    console.log(
-      "PEDIDO CRIADO:",
-      orderId
-    );
+    console.log("PEDIDO CRIADO:", orderId);
 
-    // -----------------------------------------
-    // CRIA OS ITENS DO PEDIDO
-    // -----------------------------------------
+    // -----------------------------
+    // CRIAR ITENS DO PEDIDO
+    // -----------------------------
 
     const orderItems = cart.map(
       (item: CartItem) => ({
@@ -165,17 +153,16 @@ export async function POST(request: Request) {
       return NextResponse.json(
         {
           error:
-            "Pedido criado, mas não foi possível registrar os itens.",
+            "Não foi possível registrar os itens do pedido.",
           details: itemsError.message,
-          order_id: orderId,
         },
         { status: 500 }
       );
     }
 
-    // -----------------------------------------
+    // -----------------------------
     // MERCADO PAGO
-    // -----------------------------------------
+    // -----------------------------
 
     const accessToken =
       process.env.MERCADOPAGO_ACCESS_TOKEN?.trim();
@@ -195,64 +182,54 @@ export async function POST(request: Request) {
       );
     }
 
-    const client =
-      new MercadoPagoConfig({
-        accessToken,
-      });
+    const client = new MercadoPagoConfig({
+      accessToken,
+    });
 
     const payment = new Payment(client);
 
-    // -----------------------------------------
-    // CRIA PAGAMENTO PIX
-    // -----------------------------------------
+    // -----------------------------
+    // CRIAR PIX
+    // -----------------------------
 
-    console.log(
-      "CRIANDO PAGAMENTO PIX..."
-    );
+    console.log("CRIANDO PAGAMENTO PIX...");
 
-    const pagamento =
-      await payment.create({
-        body: {
-          transaction_amount: Number(
-            total.toFixed(2)
-          ),
+    const pagamento = await payment.create({
+      body: {
+        transaction_amount: Number(
+          total.toFixed(2)
+        ),
 
-          description:
-            `Pedido ${orderId} - Camiseta da Várzea`,
+        description:
+          `Pedido ${orderId} - Camiseta da Várzea`,
 
-          payment_method_id: "pix",
+        payment_method_id: "pix",
 
-          payer: {
-            email: email,
-            first_name: nome,
-          },
-
-          external_reference: String(
-            orderId
-          ),
-
-          notification_url:
-            `${process.env.NEXT_PUBLIC_SITE_URL}/api/webhook/mercadopago`,
+        payer: {
+          email: email,
+          first_name: nome,
         },
-      });
 
-    console.log(
-      "PAGAMENTO MERCADO PAGO:",
-      {
-        id: pagamento.id,
-        status: pagamento.status,
-        status_detail:
-          pagamento.status_detail,
-      }
-    );
+        external_reference: String(orderId),
 
-    // -----------------------------------------
-    // VERIFICA SE O MERCADO PAGO ACEITOU
-    // -----------------------------------------
+        notification_url:
+          `${process.env.NEXT_PUBLIC_SITE_URL}/api/pedidos/mercadopago`,
+      },
+    });
+
+    console.log("RESPOSTA MERCADO PAGO:", {
+      id: pagamento.id,
+      status: pagamento.status,
+      status_detail: pagamento.status_detail,
+    });
+
+    // -----------------------------
+    // VERIFICAR PAGAMENTO
+    // -----------------------------
 
     if (!pagamento.id) {
       console.error(
-        "MERCADO PAGO NÃO RETORNOU PAYMENT ID:",
+        "Mercado Pago não retornou payment ID:",
         pagamento
       );
 
@@ -267,17 +244,15 @@ export async function POST(request: Request) {
       );
     }
 
-    // -----------------------------------------
-    // ATUALIZA PEDIDO COM PAYMENT ID
-    // -----------------------------------------
+    // -----------------------------
+    // SALVAR PAYMENT ID
+    // -----------------------------
 
     const { error: updateError } =
       await supabase
         .from("orders")
         .update({
-          payment_id: String(
-            pagamento.id
-          ),
+          payment_id: String(pagamento.id),
         })
         .eq("id", orderId);
 
@@ -288,15 +263,12 @@ export async function POST(request: Request) {
       );
     }
 
-    // -----------------------------------------
+    // -----------------------------
     // DADOS DO PIX
-    // -----------------------------------------
-
-    const pointOfInteraction =
-      pagamento.point_of_interaction;
+    // -----------------------------
 
     const transactionData =
-      pointOfInteraction
+      pagamento.point_of_interaction
         ?.transaction_data;
 
     const qrCode =
@@ -308,16 +280,15 @@ export async function POST(request: Request) {
     const ticketUrl =
       transactionData?.ticket_url ?? null;
 
-    console.log("PIX GERADO:", {
-      qrCodeExiste: !!qrCode,
-      qrCodeBase64Existe:
-        !!qrCodeBase64,
+    console.log("PIX:", {
+      qrCode: !!qrCode,
+      qrCodeBase64: !!qrCodeBase64,
       ticketUrl,
     });
 
-    // -----------------------------------------
+    // -----------------------------
     // RETORNO PARA O CHECKOUT
-    // -----------------------------------------
+    // -----------------------------
 
     return NextResponse.json({
       success: true,
@@ -340,41 +311,29 @@ export async function POST(request: Request) {
       ticket_url:
         ticketUrl,
     });
+
   } catch (error: any) {
-    console.error(
-      "================================"
-    );
-
-    console.error(
-      "ERRO AO CRIAR PEDIDO:"
-    );
-
+    console.error("================================");
+    console.error("ERRO AO CRIAR PEDIDO:");
     console.error(error);
+    console.error("================================");
 
-    console.error(
-      "================================"
-    );
-
-    // -----------------------------------------
-    // MOSTRA O ERRO REAL DO MERCADO PAGO
-    // -----------------------------------------
-
-    const mercadoPagoError =
+    const detalhes =
       error?.cause ??
       error?.response?.data ??
       error?.message ??
       error;
 
     console.error(
-      "DETALHES DO ERRO:",
-      mercadoPagoError
+      "DETALHES:",
+      detalhes
     );
 
     return NextResponse.json(
       {
         error:
           "Não foi possível criar o pagamento.",
-        details: mercadoPagoError,
+        details: detalhes,
       },
       { status: 402 }
     );
